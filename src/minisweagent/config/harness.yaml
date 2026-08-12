@@ -1,0 +1,23 @@
+# Configuration overlay for the streaming LiteLLM model.
+# Use it together with the normal config, for example:
+#   mini-swe-agent -c mini.yaml -c harness.yaml
+#
+# The model name is intentionally written exactly as supplied.  If a provider
+# prefix is required by the endpoint, the caller must put it here.
+model:
+  model_class: minisweagent.models.streaming_litellm_model.StreamingLitellmModel
+  model_name: replace-with-model-name
+  base_url: https://replace-with-endpoint/v1
+  api_key: replace-with-api-key
+  temperature: 0.3
+  max_tokens: 131072
+  timeout:
+    connect: 30.0
+    read: 90.0
+    write: 30.0
+    pool: 30.0
+  no_bash:
+    consecutive: 5
+    total: 25
+  api_calls_log: .logs/api_calls.log
+  allow_partial_stream: true

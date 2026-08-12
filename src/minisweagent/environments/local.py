@@ -74,6 +74,7 @@ def _run(command: str, cwd: str, env: dict[str, str], timeout: int) -> subproces
     process = subprocess.Popen(
         command,
         shell=True,
+        executable=env.get("SHELL") or None,
         text=True,
         cwd=cwd,
         env=env,
