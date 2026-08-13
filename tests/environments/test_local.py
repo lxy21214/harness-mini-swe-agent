@@ -181,6 +181,9 @@ def _process_exited(pid: int) -> bool:
             os.kill(pid, 0)
         except ProcessLookupError:
             return True
+        proc_stat = Path(f"/proc/{pid}/stat")
+        if proc_stat.is_file() and proc_stat.read_text().split()[2] == "Z":
+            return True
         time.sleep(0.1)
     return False
 

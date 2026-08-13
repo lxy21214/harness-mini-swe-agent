@@ -70,7 +70,7 @@ class LocalEnvironment:
 
 
 def _run(command: str, cwd: str, env: dict[str, str], timeout: int) -> subprocess.CompletedProcess[str]:
-    """Like subprocess.run, but kills the whole process group on timeout so no children are orphaned."""
+    """Like subprocess.run, but attempts to kill the process group on timeout."""
     process = subprocess.Popen(
         command,
         shell=True,
@@ -86,8 +86,13 @@ def _run(command: str, cwd: str, env: dict[str, str], timeout: int) -> subproces
     )
     try:
         stdout, _ = process.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        os.killpg(process.pid, signal.SIGKILL) if os.name == "posix" else process.kill()
-        stdout, _ = process.communicate()
-        raise subprocess.TimeoutExpired(command, timeout, output=stdout)
+    except subprocess.TimeoutExpired as exc:
+        try:
+            os.killpg(process.pid, signal.SIGKILL) if os.name == "posix" else process.kill()
+        except OSError:
+            pass
+        # Never call communicate() again here. A descendant may have escaped
+        # the process group while retaining stdout, so waiting for EOF can
+        # block forever even after the direct process has been killed.
+        raise subprocess.TimeoutExpired(command, timeout, output=exc.output) from exc
     return subprocess.CompletedProcess(command, process.returncode, stdout=stdout)
