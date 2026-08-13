@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime
 import logging
 import logging.handlers
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
@@ -21,6 +22,56 @@ from minisweagent.exceptions import Submitted
 from minisweagent.models.litellm_model import LitellmModel, LitellmModelConfig
 from minisweagent.models.utils.actions_toolcall import BASH_TOOL, parse_toolcall_actions
 from minisweagent.models.utils.openai_multimodal import DEFAULT_MULTIMODAL_REGEX
+
+
+@dataclass(frozen=True)
+class OfficialTokenRates:
+    """Official USD list prices per one million tokens."""
+
+    input: float
+    cached_input: float
+    output: float
+
+
+# Public standard-tier prices used for paper reporting, not the prices charged
+# by our relay. Checked against the vendors' official pricing pages on
+# 2026-08-13:
+# - https://api-docs.deepseek.com/quick_start/pricing/
+# - https://docs.z.ai/guides/overview/pricing
+# - https://platform.kimi.ai/docs/pricing/chat
+# - https://platform.minimax.io/docs/guides/pricing-paygo
+OFFICIAL_MODEL_RATES: dict[str, OfficialTokenRates] = {
+    "deepseek-v4-pro": OfficialTokenRates(input=0.435, cached_input=0.003625, output=0.87),
+    "deepseek-v4-flash": OfficialTokenRates(input=0.14, cached_input=0.0028, output=0.28),
+    "glm-5.2": OfficialTokenRates(input=1.40, cached_input=0.26, output=4.40),
+    "kimi-k3": OfficialTokenRates(input=3.00, cached_input=0.30, output=15.00),
+    "minimax-m3": OfficialTokenRates(input=0.30, cached_input=0.06, output=1.20),
+}
+
+# MiniMax charges its standard tier at twice the base rate when a request has
+# more than 512K input tokens.
+MINIMAX_M3_LONG_CONTEXT_THRESHOLD = 512_000
+MINIMAX_M3_LONG_CONTEXT_RATES = OfficialTokenRates(input=0.60, cached_input=0.12, output=2.40)
+
+# Relay/provider prefixes are intentionally ignored. The lower-cased final
+# slash-separated model name selects the architecture whose official price is
+# reported.
+MODEL_ARCHITECTURES: dict[str, str] = {
+    "deepseek-v4-pro": "deepseek-v4-pro",
+    "deepseek-v4-flash": "deepseek-v4-flash",
+    "glm5.2": "glm-5.2",
+    "glm-5.2": "glm-5.2",
+    "k3": "kimi-k3",
+    "k3-256k": "kimi-k3",
+    "kimi-k3": "kimi-k3",
+    "kimi-k3-256k": "kimi-k3",
+    "minimax-m3": "minimax-m3",
+}
+
+
+def model_architecture(model_name: str) -> str | None:
+    model_suffix = model_name.lower().rpartition("/")[-1]
+    return MODEL_ARCHITECTURES.get(model_suffix)
 
 
 class HTTPTimeoutConfig(BaseModel):
@@ -132,6 +183,36 @@ class StreamingLitellmModel(LitellmModel):
         if isinstance(self.config.timeout, HTTPTimeoutConfig):
             return self.config.timeout.build()
         return httpx.Timeout(self.config.timeout)
+
+    def _calculate_cost(self, response) -> dict[str, float]:
+        architecture = model_architecture(self.config.model_name)
+        usage = getattr(response, "usage", None)
+        if architecture is None or usage is None:
+            return super()._calculate_cost(response)
+
+        prompt_tokens = max(float(getattr(usage, "prompt_tokens", 0) or 0), 0.0)
+        completion_tokens = max(float(getattr(usage, "completion_tokens", 0) or 0), 0.0)
+        prompt_details = getattr(usage, "prompt_tokens_details", None)
+        cached_tokens = float(getattr(prompt_details, "cached_tokens", 0) or 0)
+        if not cached_tokens:
+            cached_tokens = float(
+                getattr(usage, "prompt_cache_hit_tokens", 0)
+                or getattr(usage, "cache_read_input_tokens", 0)
+                or 0
+            )
+        cached_tokens = min(max(cached_tokens, 0.0), prompt_tokens)
+        uncached_tokens = prompt_tokens - cached_tokens
+
+        rates = OFFICIAL_MODEL_RATES[architecture]
+        if architecture == "minimax-m3" and prompt_tokens > MINIMAX_M3_LONG_CONTEXT_THRESHOLD:
+            rates = MINIMAX_M3_LONG_CONTEXT_RATES
+
+        cost = (
+            uncached_tokens * rates.input
+            + cached_tokens * rates.cached_input
+            + completion_tokens * rates.output
+        ) / 1_000_000
+        return {"cost": cost}
 
     def _query(self, messages: list[dict[str, str]], **kwargs):
         start_time = datetime.datetime.now(datetime.UTC)

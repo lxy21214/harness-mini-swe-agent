@@ -9,6 +9,7 @@ from minisweagent.exceptions import Submitted
 from minisweagent.models.streaming_litellm_model import (
     HTTPTimeoutConfig,
     StreamingLitellmModel,
+    model_architecture,
 )
 
 
@@ -20,13 +21,77 @@ def _response(tool_calls=None, finish_reason="stop"):
 
 
 def _model(tmp_path: Path, **kwargs):
+    model_name = kwargs.pop("model_name", "@provider/model")
     return StreamingLitellmModel(
-        model_name="@provider/model",
+        model_name=model_name,
         base_url="https://model.example/v1",
         api_key="test-key",
         api_calls_log=str(tmp_path / "api_calls.log"),
         **kwargs,
     )
+
+
+def _priced_response(prompt_tokens, cached_tokens, completion_tokens):
+    return SimpleNamespace(
+        usage=SimpleNamespace(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            prompt_tokens_details=SimpleNamespace(cached_tokens=cached_tokens),
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("model_name", "architecture"),
+    [
+        ("openai/@relay/DeepSeek-V4-Pro", "deepseek-v4-pro"),
+        ("@relay/DeepSeek-V4-Flash", "deepseek-v4-flash"),
+        ("openai/@relay/GLM5.2", "glm-5.2"),
+        ("openai/@relay/GLM-5.2", "glm-5.2"),
+        ("openai/k3", "kimi-k3"),
+        ("@relay/K3-256K", "kimi-k3"),
+        ("openai/@relay/Kimi-K3", "kimi-k3"),
+        ("openai/@relay/Kimi-K3-256K", "kimi-k3"),
+        ("openai/@relay/MiniMax/MiniMax-M3", "minimax-m3"),
+    ],
+)
+def test_model_suffix_maps_to_official_architecture(model_name, architecture):
+    assert model_architecture(model_name) == architecture
+
+
+@pytest.mark.parametrize(
+    ("model_name", "expected_cost"),
+    [
+        ("openai/@relay/deepseek-v4-pro", 0.1308625),
+        ("openai/@relay/deepseek-v4-flash", 0.04228),
+        ("openai/@relay/glm5.2", 0.606),
+        ("openai/k3", 1.83),
+        ("openai/@relay/k3-256k", 1.83),
+        ("openai/@relay/kimi-k3", 1.83),
+        ("openai/@relay/kimi-k3-256k", 1.83),
+        ("openai/@relay/minimax-m3", 0.156),
+    ],
+)
+def test_cost_uses_official_architecture_prices(tmp_path, model_name, expected_cost):
+    model = _model(tmp_path, model_name=model_name)
+    response = _priced_response(
+        prompt_tokens=200_000,
+        cached_tokens=100_000,
+        completion_tokens=100_000,
+    )
+
+    assert model._calculate_cost(response)["cost"] == pytest.approx(expected_cost)
+
+
+def test_minimax_m3_uses_long_context_price_above_512k(tmp_path):
+    model = _model(tmp_path, model_name="openai/@relay/minimax-m3")
+    response = _priced_response(
+        prompt_tokens=600_000,
+        cached_tokens=100_000,
+        completion_tokens=100_000,
+    )
+
+    assert model._calculate_cost(response)["cost"] == pytest.approx(0.552)
 
 
 def test_model_parameters_are_taken_verbatim_from_config(tmp_path):
