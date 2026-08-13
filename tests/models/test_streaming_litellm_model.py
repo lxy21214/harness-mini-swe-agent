@@ -89,7 +89,32 @@ def test_streaming_model_records_api_calls_only_in_its_configured_log(tmp_path):
 
     log = (tmp_path / "api_calls.log").read_text(encoding="utf-8")
     assert "ModelResponse" in log
+    assert "| APICalls | INFO" in log
     assert "test-key" not in log
+
+
+def test_streaming_model_can_mirror_api_calls_to_console(tmp_path, capsys):
+    model = _model(tmp_path, api_calls_console=True)
+
+    class FakeResponse:
+        def __str__(self):
+            return "ModelResponse(id=console-response)"
+
+    with (
+        patch(
+            "minisweagent.models.streaming_litellm_model.litellm.completion",
+            return_value=iter([object()]),
+        ),
+        patch(
+            "minisweagent.models.streaming_litellm_model.litellm.stream_chunk_builder",
+            return_value=FakeResponse(),
+        ),
+    ):
+        model._query([{"role": "user", "content": "hello"}])
+
+    console = capsys.readouterr().err
+    assert "| APICalls | INFO" in console
+    assert "ModelResponse(id=console-response)" in console
 
 
 def test_five_consecutive_no_bash_responses_finish(tmp_path):
@@ -103,6 +128,8 @@ def test_five_consecutive_no_bash_responses_finish(tmp_path):
     message = raised.value.messages[0]
     assert message["extra"]["exit_status"] == "NoBashCompletion"
     assert "5 consecutive" in message["content"]
+    log = (tmp_path / "api_calls.log").read_text(encoding="utf-8")
+    assert "Completed mini-swe-agent after 5 consecutive" in log
 
 
 def test_bash_resets_consecutive_count_but_not_total(tmp_path):

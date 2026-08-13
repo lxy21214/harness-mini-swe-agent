@@ -59,6 +59,7 @@ class StreamingLitellmModelConfig(LitellmModelConfig):
     timeout: HTTPTimeoutConfig | float = Field(default_factory=HTTPTimeoutConfig)
     no_bash: NoBashConfig = Field(default_factory=NoBashConfig)
     api_calls_log: str | None = ".logs/api_calls.log"
+    api_calls_console: bool = False
     allow_partial_stream: bool = True
     multimodal_regex: str = DEFAULT_MULTIMODAL_REGEX
 
@@ -75,10 +76,13 @@ class StreamingLitellmModel(LitellmModel):
         super().__init__(config_class=StreamingLitellmModelConfig, **kwargs)
         self._consecutive_no_bash_responses = 0
         self._total_no_bash_responses = 0
-        self._api_logger = self._make_api_logger(self.config.api_calls_log)
+        self._api_logger = self._make_api_logger(
+            self.config.api_calls_log,
+            self.config.api_calls_console,
+        )
 
     @staticmethod
-    def _make_api_logger(log_path: str | None) -> logging.Logger:
+    def _make_api_logger(log_path: str | None, console: bool) -> logging.Logger:
         if log_path:
             path = Path(log_path).resolve()
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -90,6 +94,10 @@ class StreamingLitellmModel(LitellmModel):
         logger = logging.getLogger(logger_name)
         logger.propagate = False
         logger.setLevel(logging.DEBUG)
+        formatter = logging.Formatter(
+            fmt="%(asctime)s | APICalls | %(levelname)-8s | %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
 
         if path and not any(
             isinstance(handler, logging.handlers.RotatingFileHandler)
@@ -102,13 +110,22 @@ class StreamingLitellmModel(LitellmModel):
                 backupCount=5,
                 encoding="utf-8",
             )
-            handler.setFormatter(
-                logging.Formatter(
-                    fmt="%(asctime)s | %(name)s | %(levelname)-8s | %(message)s",
-                    datefmt="%Y-%m-%d %H:%M:%S",
-                )
-            )
+            handler.setLevel(logging.DEBUG)
+            handler.setFormatter(formatter)
             logger.addHandler(handler)
+
+        if console and not any(
+            getattr(handler, "_mswea_api_calls_console", False)
+            for handler in logger.handlers
+        ):
+            handler = logging.StreamHandler()
+            handler.setLevel(logging.INFO)
+            handler.setFormatter(formatter)
+            handler._mswea_api_calls_console = True  # type: ignore[attr-defined]
+            logger.addHandler(handler)
+
+        if not logger.handlers:
+            logger.addHandler(logging.NullHandler())
         return logger
 
     def _timeout(self) -> httpx.Timeout:
@@ -189,9 +206,9 @@ class StreamingLitellmModel(LitellmModel):
             template_kwargs={"finish_reason": response.choices[0].finish_reason},
         )
 
-    @staticmethod
-    def _no_bash_completion(reason: str) -> Submitted:
+    def _no_bash_completion(self, reason: str) -> Submitted:
         message = f"Completed mini-swe-agent after {reason}"
+        self._api_logger.info("%s", message)
         return Submitted(
             {
                 "role": "exit",

@@ -20,4 +20,5 @@ model:
     consecutive: 5
     total: 25
   api_calls_log: .logs/api_calls.log
+  api_calls_console: false
   allow_partial_stream: true
