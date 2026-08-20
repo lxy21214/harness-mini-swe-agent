@@ -31,14 +31,23 @@ def _model(tmp_path: Path, **kwargs):
     )
 
 
-def _priced_response(prompt_tokens, cached_tokens, completion_tokens):
-    return SimpleNamespace(
-        usage=SimpleNamespace(
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            prompt_tokens_details=SimpleNamespace(cached_tokens=cached_tokens),
-        )
+def _priced_response(
+    prompt_tokens,
+    cached_tokens,
+    completion_tokens,
+    cache_write_tokens=0,
+    input_tokens=None,
+):
+    usage = SimpleNamespace(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        prompt_tokens_details=SimpleNamespace(cached_tokens=cached_tokens),
     )
+    if cache_write_tokens:
+        usage.cache_creation_input_tokens = cache_write_tokens
+    if input_tokens is not None:
+        usage.input_tokens = input_tokens
+    return SimpleNamespace(usage=usage)
 
 
 @pytest.mark.parametrize(
@@ -46,6 +55,9 @@ def _priced_response(prompt_tokens, cached_tokens, completion_tokens):
     [
         ("openai/@relay/DeepSeek-V4-Pro", "deepseek-v4-pro"),
         ("@relay/DeepSeek-V4-Flash", "deepseek-v4-flash"),
+        ("openai/@relay/Claude-Sonnet-4.6", "claude-sonnet-4.6"),
+        ("openai/@relay/Claude-Sonnet-4-6", "claude-sonnet-4.6"),
+        ("openai/gpt-5.6-sol", "gpt-5.6-sol"),
         ("openai/@relay/GLM5.2", "glm-5.2"),
         ("openai/@relay/GLM-5.2", "glm-5.2"),
         ("openai/k3", "kimi-k3"),
@@ -53,6 +65,9 @@ def _priced_response(prompt_tokens, cached_tokens, completion_tokens):
         ("openai/@relay/Kimi-K3", "kimi-k3"),
         ("openai/@relay/Kimi-K3-256K", "kimi-k3"),
         ("openai/@relay/MiniMax/MiniMax-M3", "minimax-m3"),
+        ("vendor/Claude-Sonnet-4.5-20250929", "claude-sonnet-4.5"),
+        ("vendor/GPT-5.5-pro-thinking", "gpt-5.5-pro"),
+        ("vendor/GLM.5-2-preview", "glm-5.2"),
     ],
 )
 def test_model_suffix_maps_to_official_architecture(model_name, architecture):
@@ -62,8 +77,8 @@ def test_model_suffix_maps_to_official_architecture(model_name, architecture):
 @pytest.mark.parametrize(
     ("model_name", "expected_cost"),
     [
-        ("openai/@relay/deepseek-v4-pro", 0.1308625),
-        ("openai/@relay/deepseek-v4-flash", 0.04228),
+        ("openai/@relay/deepseek-v4-pro", 0.2662),
+        ("openai/@relay/deepseek-v4-flash", 0.0887),
         ("openai/@relay/glm5.2", 0.606),
         ("openai/k3", 1.83),
         ("openai/@relay/k3-256k", 1.83),
@@ -92,6 +107,41 @@ def test_minimax_m3_uses_long_context_price_above_512k(tmp_path):
     )
 
     assert model._calculate_cost(response)["cost"] == pytest.approx(0.552)
+
+
+def test_new_rate_rows_include_cache_write_pricing(tmp_path):
+    model = _model(tmp_path, model_name="openai/@relay/claude-sonnet-5")
+    response = _priced_response(
+        prompt_tokens=100_000,
+        cached_tokens=20_000,
+        cache_write_tokens=10_000,
+        completion_tokens=10_000,
+    )
+
+    # (70K * 2.0 + 20K * .2 + 10K * 2.5 + 10K * 10.0) / 1M
+    assert model._calculate_cost(response)["cost"] == pytest.approx(0.269)
+
+
+def test_anthropic_style_separate_input_and_cache_usage_is_supported(tmp_path):
+    model = _model(tmp_path, model_name="openai/@relay/claude-sonnet-5")
+    response = _priced_response(
+        prompt_tokens=0,
+        cached_tokens=20_000,
+        cache_write_tokens=10_000,
+        input_tokens=70_000,
+        completion_tokens=10_000,
+    )
+
+    assert model._calculate_cost(response)["cost"] == pytest.approx(0.269)
+
+
+def test_context_tier_changes_at_the_declared_boundary(tmp_path):
+    model = _model(tmp_path, model_name="openai/gpt-5.6-sol")
+    short_context = _priced_response(271_999, 0, 0)
+    long_context = _priced_response(272_000, 0, 0)
+
+    assert model._calculate_cost(short_context)["cost"] == pytest.approx(1.359995)
+    assert model._calculate_cost(long_context)["cost"] == pytest.approx(2.72)
 
 
 def test_model_parameters_are_taken_verbatim_from_config(tmp_path):

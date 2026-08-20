@@ -99,7 +99,7 @@ agent:
     anything
     ```
   step_limit: 0
-  cost_limit: 3.
+  cost_limit: 300.
   mode: confirm
 environment:
   env:
