@@ -24,11 +24,16 @@ from minisweagent.models.litellm_model import LitellmModel, LitellmModelConfig
 from minisweagent.models.utils.actions_toolcall import BASH_TOOL, parse_toolcall_actions
 from minisweagent.models.utils.openai_multimodal import DEFAULT_MULTIMODAL_REGEX
 
+# Model-name regex → openrouter provider pinned via provider.only.
+_PROVIDER_ONLY_ROUTING: list[tuple[str, str]] = [
+    (r"\bgpt\b", "OpenAI"),
+    (r"gemini", "Google Vertex"),
+]
+
 
 @dataclass(frozen=True)
 class OfficialTokenRates:
     """Official USD list prices per one million tokens."""
-
     input: float
     cached_input: float
     output: float
@@ -502,13 +507,15 @@ class StreamingLitellmModel(LitellmModel):
             }
         )
 
-        # Route gpt-family models to the OpenAI provider (openrouter provider
-        # selection: https://openrouter.ai/docs/guides/routing/provider-selection).
+        # Pin model families to their provider via openrouter provider
+        # selection (https://openrouter.ai/docs/guides/routing/provider-selection).
         # The detection is based on the model name only: the devbox does not
         # expose the upstream base URL, so we cannot tell whether the request
         # goes through openrouter and must not try to.
-        if re.search(r"\bgpt\b", self.config.model_name, re.IGNORECASE):
-            request_kwargs.setdefault("provider", {"only": ["OpenAI"]})
+        for pattern, provider_name in _PROVIDER_ONLY_ROUTING:
+            if re.search(pattern, self.config.model_name, re.IGNORECASE):
+                request_kwargs.setdefault("provider", {"only": [provider_name]})
+                break
 
         try:
             for chunk in litellm.completion(**request_kwargs):
