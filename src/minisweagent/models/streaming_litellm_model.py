@@ -508,7 +508,7 @@ class StreamingLitellmModel(LitellmModel):
         # expose the upstream base URL, so we cannot tell whether the request
         # goes through openrouter and must not try to.
         if re.search(r"\bgpt\b", self.config.model_name, re.IGNORECASE):
-            request_kwargs.setdefault("provider", {"order": ["OpenAI"]})
+            request_kwargs.setdefault("provider", {"only": ["OpenAI"]})
 
         try:
             for chunk in litellm.completion(**request_kwargs):
