@@ -27,7 +27,7 @@ from minisweagent.models.utils.openai_multimodal import DEFAULT_MULTIMODAL_REGEX
 # Model-name regex → openrouter provider pinned via provider.only.
 _PROVIDER_ONLY_ROUTING: list[tuple[str, str]] = [
     (r"\bgpt\b", "OpenAI"),
-    (r"gemini", "Google Vertex"),
+    (r"gemini", "google-vertex"),
 ]
 
 
