@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime
 import logging
 import logging.handlers
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -500,6 +501,14 @@ class StreamingLitellmModel(LitellmModel):
                 "timeout": self._timeout(),
             }
         )
+
+        # Route gpt-family models to the OpenAI provider (openrouter provider
+        # selection: https://openrouter.ai/docs/guides/routing/provider-selection).
+        # The detection is based on the model name only: the devbox does not
+        # expose the upstream base URL, so we cannot tell whether the request
+        # goes through openrouter and must not try to.
+        if re.search(r"\bgpt\b", self.config.model_name, re.IGNORECASE):
+            request_kwargs.setdefault("provider", {"order": ["OpenAI"]})
 
         try:
             for chunk in litellm.completion(**request_kwargs):
