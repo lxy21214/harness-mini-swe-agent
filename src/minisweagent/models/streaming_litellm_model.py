@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime
 import logging
 import logging.handlers
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -327,12 +328,18 @@ class NoBashConfig(BaseModel):
 class StreamingLitellmModelConfig(LitellmModelConfig):
     """Configuration read from the model section of a YAML config file."""
 
-    # Keep these settings explicit and configuration-driven.  In particular,
-    # this model does not inspect environment variables for API parameters.
+    # Keep these settings explicit and configuration-driven.  API parameters
+    # come from the config file; MINISWEA_TEMPERATURE / MINISWEA_MAX_TOKENS
+    # environment variables may override temperature / max_tokens (the env
+    # default is used only when the config omits the field).
     base_url: str
     api_key: SecretStr
-    temperature: float = 0.3
-    max_tokens: int = 131072
+    temperature: float = Field(
+        default_factory=lambda: float(os.environ.get("MINISWEA_TEMPERATURE", "0.3"))
+    )
+    max_tokens: int = Field(
+        default_factory=lambda: int(os.environ.get("MINISWEA_MAX_TOKENS", "131072"))
+    )
     timeout: HTTPTimeoutConfig | float = Field(default_factory=HTTPTimeoutConfig)
     no_bash: NoBashConfig = Field(default_factory=NoBashConfig)
     api_calls_log: str | None = ".logs/api_calls.log"
