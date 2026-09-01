@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+import httpcore
 import httpx
 import litellm
 from pydantic import BaseModel, Field, SecretStr
@@ -30,6 +31,42 @@ _PROVIDER_ONLY_ROUTING: list[tuple[str, str]] = [
     (r"\bgpt\b", "OpenAI"),
     (r"gemini", "google-vertex"),
 ]
+
+# Extra routings injected at import time via the MINISWEA_PROVIDER_ROUTING
+# environment variable.  Format: comma-separated "regex=provider" pairs,
+# e.g. "claude=anthropic,qwen=Alibaba".  Entries are appended after the
+# built-in table (first match wins), so the built-ins keep precedence.
+def _load_extra_provider_routing() -> None:
+    for pair in filter(None, os.environ.get("MINISWEA_PROVIDER_ROUTING", "").split(",")):
+        regex, _, provider = pair.partition("=")
+        if regex and provider:
+            _PROVIDER_ONLY_ROUTING.append((regex.strip(), provider.strip()))
+
+
+_load_extra_provider_routing()
+
+# Adaptive read-timeout: start from the configured read timeout; on a
+# ReadTimeout the wait is extended by _READ_TIMEOUT_STEP and retried, up to
+# _READ_TIMEOUT_ATTEMPTS attempts per call.  A successful value becomes the
+# permanent default for subsequent calls (contexts only grow over time).
+_READ_TIMEOUT_STEP = 60.0
+_READ_TIMEOUT_MAX = 600.0
+_READ_TIMEOUT_ATTEMPTS = 3
+
+
+def _is_read_timeout(exc: BaseException) -> bool:
+    """Walk the cause/context chain looking for an httpx/httpcore ReadTimeout."""
+    seen: set[int] = set()
+    stack: list[BaseException] = [exc]
+    while stack:
+        err = stack.pop()
+        if id(err) in seen:
+            continue
+        seen.add(id(err))
+        if isinstance(err, (httpx.ReadTimeout, httpcore.ReadTimeout)):
+            return True
+        stack.extend(e for e in (err.__cause__, err.__context__) if e is not None)
+    return False
 
 
 @dataclass(frozen=True)
@@ -360,6 +397,12 @@ class StreamingLitellmModel(LitellmModel):
         super().__init__(config_class=StreamingLitellmModelConfig, **kwargs)
         self._consecutive_no_bash_responses = 0
         self._total_no_bash_responses = 0
+        # Current adaptive read timeout; None disables adaptation (plain
+        # float timeout configs keep their static value).
+        if isinstance(self.config.timeout, HTTPTimeoutConfig):
+            self._read_timeout: float | None = self.config.timeout.read
+        else:
+            self._read_timeout = None
         self._api_logger = self._make_api_logger(
             self.config.api_calls_log,
             self.config.api_calls_console,
@@ -414,7 +457,9 @@ class StreamingLitellmModel(LitellmModel):
 
     def _timeout(self) -> httpx.Timeout:
         if isinstance(self.config.timeout, HTTPTimeoutConfig):
-            return self.config.timeout.build()
+            return self.config.timeout.model_copy(
+                update={"read": self._read_timeout}
+            ).build()
         return httpx.Timeout(self.config.timeout)
 
     def _calculate_cost(self, response) -> dict[str, float]:
@@ -497,7 +542,6 @@ class StreamingLitellmModel(LitellmModel):
 
     def _query(self, messages: list[dict[str, str]], **kwargs):
         start_time = datetime.datetime.now(datetime.UTC)
-        chunks = []
         request_kwargs: dict[str, Any] = dict(self.config.model_kwargs)
         request_kwargs.update(kwargs)
         request_kwargs.update(
@@ -510,7 +554,6 @@ class StreamingLitellmModel(LitellmModel):
                 "stream": True,
                 "temperature": self.config.temperature,
                 "max_tokens": self.config.max_tokens,
-                "timeout": self._timeout(),
             }
         )
 
@@ -524,14 +567,39 @@ class StreamingLitellmModel(LitellmModel):
                 request_kwargs.setdefault("provider", {"only": [provider_name]})
                 break
 
-        try:
-            for chunk in litellm.completion(**request_kwargs):
-                chunks.append(chunk)
-        except Exception:
-            if not (self.config.allow_partial_stream and chunks):
-                self._api_logger.exception("Streaming model call failed")
-                raise
-            self._api_logger.warning("Streaming model call ended after a partial response", exc_info=True)
+        chunks = []
+        attempts = _READ_TIMEOUT_ATTEMPTS if self._read_timeout is not None else 1
+        for attempt in range(attempts):
+            chunks = []
+            request_kwargs["timeout"] = self._timeout()
+            try:
+                for chunk in litellm.completion(**request_kwargs):
+                    chunks.append(chunk)
+                # Success: the wait time just used (self._read_timeout) becomes
+                # the permanent default for subsequent calls.
+                break
+            except Exception as exc:
+                if (
+                    self._read_timeout is not None
+                    and attempt + 1 < attempts
+                    and _is_read_timeout(exc)
+                ):
+                    self._read_timeout = min(
+                        self._read_timeout + _READ_TIMEOUT_STEP, _READ_TIMEOUT_MAX
+                    )
+                    self._api_logger.warning(
+                        "Read timeout; extending read timeout to %.0fs and "
+                        "retrying (attempt %d/%d)",
+                        self._read_timeout,
+                        attempt + 2,
+                        attempts,
+                    )
+                    continue
+                if not (self.config.allow_partial_stream and chunks):
+                    self._api_logger.exception("Streaming model call failed")
+                    raise
+                self._api_logger.warning("Streaming model call ended after a partial response", exc_info=True)
+                break
 
         response = litellm.stream_chunk_builder(
             chunks,
